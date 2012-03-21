@@ -1,0 +1,17 @@
+{
+  "motd": "Minecraft VirtualHost Proxy",
+  "capacity": 10,
+  "players": 3,
+  "hosts": {
+    "localhost": {
+      "host": "192.168.0.6"
+    },
+    "127.0.0.1": {
+      "port": 25566,
+      "alias": [
+        "127.0.0.2",
+        "xyz.dyndns.org"
+      ]
+    }
+  }
+}

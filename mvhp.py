@@ -1,4 +1,5 @@
 #!/bin/env python
+# -*- coding: utf-8 -*-
 
 # This program is free software. It comes without any warranty, to
 # the extent permitted by applicable law. You can redistribute it
@@ -10,20 +11,19 @@ import asyncore
 import asynchat
 import socket
 import re
+import signal
+import sys
+
+try:
+    import json
+except:
+    import simplejson as json
+
+from codecs import utf_16_be_encode, utf_16_be_decode
 from struct import pack, unpack
 
-# Virtual host definitions
-HOSTS = {
-    "localhost": {"host": "localhost", "port": 25566},
-    "127.0.0.1": {"port": 25567},   # host defaults to 'localhost'
-    None: {"port": 25568}           # default / fallback
-}
 
-# Since the host is not sent in the server list query, this is static.
-# This might (hopefully) change in the near future.
-MOTD = "Minecraft VirtualHost Proxy"
-MAX_PLAYERS = 10
-CUR_PLAYERS = 3
+CONFIG_PATH = "config.json"
 
 
 def pack_string(string):
@@ -33,8 +33,9 @@ def pack_string(string):
     This function can't actually handle UCS-2, therefore kick messages and
     the MOTD can't contain special characters.
     '''
+    string = u"".join(i if ord(i) < 65536 else u"?" for i in string)
     return (pack(">h", len(string)) +
-            "".join([pack(">bc", 0, c) for c in string]))
+            utf_16_be_encode(string, "replace")[0])
 
 
 def unpack_string(data):
@@ -46,7 +47,7 @@ def unpack_string(data):
     '''
     (l,) = unpack(">h", data[:2])
     assert len(data) >= 2 + 2 * l
-    return data[3:l * 2:2]
+    return utf_16_be_decode(data[2:l * 2])[0]
 
 
 class Router:
@@ -61,7 +62,9 @@ class Router:
         Finds the target host and port based on the handshake string.
         '''
         host = Router.find_host(name)
-        target = HOSTS.get(host)
+        target = config.hosts.get(host, None)
+        if target is None:
+            return None
         return (target.get("host", "localhost"), target.get("port", 25565))
 
     @staticmethod
@@ -73,7 +76,7 @@ class Router:
         if match is None:
             return
         host = match.group(2)
-        if host not in HOSTS:
+        if host not in config.hosts:
             return
         return host
 
@@ -84,11 +87,12 @@ class Listener(asyncore.dispatcher):
     '''
     def __init__(self, host, port):
         asyncore.dispatcher.__init__(self)
+        self.clients = []
         self.create_socket(socket.AF_INET, socket.SOCK_STREAM)
         self.set_reuse_addr()
         self.bind((host, port))
         self.listen(5)
-        print "Listening for connections to %s:%s" % (host, port)
+        print "Listening for connections on %s:%s" % (host, port)
 
     def handle_accept(self):
         '''
@@ -99,7 +103,23 @@ class Listener(asyncore.dispatcher):
             pass
         else:
             sock, addr = pair
-            handler = ClientTunnel(sock, addr)
+            self.clients.append(ClientTunnel(sock, addr, self))
+
+    def remove(self, client):
+        '''
+        Removes a client from the list of connections.
+        '''
+        if client in self.clients:
+            self.clients.remove(client)
+
+    def terminate(self):
+        '''
+        Disconnects all clients and stops listening for new ones.
+        '''
+        print "Shutting down..."
+        for client in self.clients:
+            client.kick("The proxy server is shutting down")
+        self.close()
 
     @staticmethod
     def loop():
@@ -113,13 +133,13 @@ class ClientTunnel(asynchat.async_chat):
     '''
     Handles a connecting client and assigns it to a server
     '''
-    DELIMITER = chr(0xa7)
-
-    def __init__(self, sock, addr):
+    def __init__(self, sock, addr, parent):
         asynchat.async_chat.__init__(self, sock)
+        self.parent = parent
         self.set_terminator(None)
         self.ibuffer = ""
         self.bound = False
+        self.server = None
         self.addr = "%s:%s" % addr
         self.log("Incomming connection")
 
@@ -146,9 +166,9 @@ class ClientTunnel(asynchat.async_chat):
                 (packetId,) = unpack(">B", self.ibuffer[0])
                 if packetId == 0xfe:        # Handle server list query
                     self.log("Received server list query")
-                    self.kick(("%s" * 5) % (MOTD, self.DELIMITER,
-                                          CUR_PLAYERS, self.DELIMITER,
-                                          MAX_PLAYERS))
+                    self.kick(u"%s§%s§%s" % (config.motd,
+                                            config.players,
+                                            config.capacity))
                 elif packetId == 0x02:      # Handle handshake
                     if len(self.ibuffer) >= 3:
                         (l,) = unpack(">h", self.ibuffer[1:3])
@@ -161,7 +181,11 @@ class ClientTunnel(asynchat.async_chat):
         '''
         Finds the target server and creates a ServerTunnel to it.
         '''
-        (host, port) = Router.route(name)
+        server = Router.route(name)
+        if server is None:
+            self.kick("No minecraft server exists at this address")
+            return
+        (host, port) = server
         self.log("Forwarding to %s:%s" % (host, port))
         self.server = ServerTunnel(host, port, self, name)
         self.bound = True
@@ -175,12 +199,17 @@ class ClientTunnel(asynchat.async_chat):
         self.close()
 
     def handle_close(self):
+        self.log("Client closed connection")
+        self.close()
+
+    def close(self):
         '''
         Terminates the ServerTunnel if the client closes the connection.
         '''
-        self.log("Client closed connection")
-        self.server.close()
-        self.close()
+        self.parent.remove(self)
+        if self.server is not None:
+            self.server.close()
+        asynchat.async_chat.close(self)
 
 
 class ServerTunnel(asynchat.async_chat):
@@ -207,11 +236,14 @@ class ServerTunnel(asynchat.async_chat):
         '''
         Handles socket errors
         '''
-        err = self.socket.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
-        if err == 61:
-            self.client.kick("Server unreachable")
-        else:
-            self.client.kick("Unexpected error")
+        try:
+            err = self.socket.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
+            if err == 61:
+                self.client.kick("Server unreachable")
+                return
+        except:
+            pass
+        self.client.kick("Unexpected error")
 
     def handle_connect(self):
         '''
@@ -226,6 +258,7 @@ class ServerTunnel(asynchat.async_chat):
         self.log("Server closed connection")
         self.client.close()
         self.close()
+        self.client.parent.remove(self.client)
 
     def collect_incoming_data(self, data):
         '''
@@ -233,6 +266,89 @@ class ServerTunnel(asynchat.async_chat):
         '''
         self.client.push(data)
 
+
+class Config:
+    '''
+    Global configuration
+    '''
+    def __init__(self, path):
+        self._path = path
+        self.reload()
+
+    def reload(self):
+        '''
+        Loads the configuration from file .
+        '''
+        fp = open(self._path, "r")
+        try:
+            raw_config = json.load(fp)
+        finally:
+            fp.close()
+        if not isinstance(raw_config, dict):
+            raise Exception("Invalid structure")
+        self.hosts = self._expand(raw_config.get("hosts", {}))
+        self.capacity = raw_config.get("capacity", 0)
+        self.players = raw_config.get("players", 0)
+        self.motd = raw_config.get("motd", "Minecraft VirtualHost Proxy")
+        print "Loaded %s host definitions" % len(self.hosts)
+
+    def _expand(self, hosts):
+        '''
+        Resolves aliases in hosts and validates hosts.
+        '''
+        for host, config in hosts.items():
+            if not isinstance(config, dict):
+                hosts.pop(host)
+                continue
+            if "port" in config:
+                port = config.get("port")
+                if not isinstance(port, int) or port < 0 or port > 65535:
+                    print "Invalid port for host %s: %s" % (host, port)
+                    config.pop("port")
+            if isinstance(config.get("alias"), list):
+                for alias in config.get("alias"):
+                    if alias not in hosts:
+                        hosts.update({alias: config})
+                config.pop("alias")
+        return hosts
+
+
+def refresh(signum, frame):
+    '''
+    Reload the configuration on SIGHUP
+    '''
+    try:
+        config.reload()
+    except Exception as e:
+        print "Invalid configuration file:"
+        print e
+
+
+def info(signum, frame):
+    '''
+    Show client count on SIGINFO
+    '''
+    print "Hosts: %s Clients: %s" % (len(config.hosts), len(server.clients))
+
+
+def terminate(signum, frame):
+    '''
+    Disconnect all clients before terminating
+    '''
+    server.terminate()
+    sys.exit(0)
+
+
 if __name__ == "__main__":
+    try:
+        config = Config(CONFIG_PATH)
+    except Exception as e:
+        print "Invalid configuration file:"
+        print e
+        sys.exit(1)
+    signal.signal(signal.SIGHUP, refresh)
+    signal.signal(signal.SIGINFO, info)
+    signal.signal(signal.SIGTERM, terminate)
+    signal.signal(signal.SIGINT, terminate)
     server = Listener('0.0.0.0', 25565)
     Listener.loop()
