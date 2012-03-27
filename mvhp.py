@@ -345,8 +345,17 @@ if __name__ == "__main__":
         print "Invalid configuration file:"
         print e
         sys.exit(1)
-    signal.signal(signal.SIGHUP, refresh)
-    signal.signal(signal.SIGINFO, info)
+    
+    try:
+        signal.signal(signal.SIGHUP, refresh)
+    except Exception as e:
+        print "NOTICE: SIGHUP not supported on your OS"
+    
+    try:
+        signal.signal(signal.SIGINFO, info)
+    except Exception as e:
+        print "NOTICE: SIGINFO not supported on your OS"
+    
     signal.signal(signal.SIGTERM, terminate)
     signal.signal(signal.SIGINT, terminate)
     server = Listener('0.0.0.0', 25565)
