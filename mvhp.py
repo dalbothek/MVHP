@@ -141,7 +141,7 @@ class ClientTunnel(asynchat.async_chat):
         self.bound = False
         self.server = None
         self.addr = "%s:%s" % addr
-        self.log("Incomming connection")
+        self.log("Incoming connection")
 
     def log(self, message):
         '''
