@@ -167,7 +167,7 @@ class ClientTunnel(asynchat.async_chat):
                 if packetId == 0xfe:        # Handle server list query
                     self.log("Received server list query")
                     self.kick(u"%s§%s§%s" % (config.motd,
-                                            config.players,
+                                            len(server.clients)-1, # Subtract one since connecting to poll server counts as a connection
                                             config.capacity))
                 elif packetId == 0x02:      # Handle handshake
                     if len(self.ibuffer) >= 3:
@@ -288,7 +288,6 @@ class Config:
             raise Exception("Invalid structure")
         self.hosts = self._expand(raw_config.get("hosts", {}))
         self.capacity = raw_config.get("capacity", 0)
-        self.players = raw_config.get("players", 0)
         self.motd = raw_config.get("motd", "Minecraft VirtualHost Proxy")
         print "Loaded %s host definitions" % len(self.hosts)
 
