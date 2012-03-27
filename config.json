@@ -1,7 +1,6 @@
 {
   "motd": "Minecraft VirtualHost Proxy",
   "capacity": 10,
-  "players": 3,
   "hosts": {
     "localhost": {
       "host": "192.168.0.6"
