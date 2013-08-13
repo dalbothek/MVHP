@@ -20,7 +20,6 @@ Sample configuration:
 {
   "motd": "Minecraft VirtualHost Proxy",   # MOTD displayed in the server list
   "capacity": 10,                          # Maximal player capacity displayed in the server list
-  "players": 3,                            # Connected players displayed in the server list
   "hosts": {                               # Host definitions
     "localhost": {                         # Rule for clients connecting to "localhost"
       "host": "192.168.0.6"                # They are redirected to 192.168.0.6
